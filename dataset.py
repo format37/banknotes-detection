@@ -18,6 +18,34 @@ from PIL import Image
 
 load_dotenv()
 
+# Class ID to name mapping (from original dataset)
+ID_TO_CLASS_NAME = {
+    0: "check",
+    1: "napkins",
+    2: "glue",
+    3: "banknotes",
+    4: "banknotes_batch",
+    5: "calculator",
+    6: "bcard",
+    7: "partpack",
+    8: "photo_paper",
+    9: "iceberg_card",
+    10: "document",
+    11: "package",
+    12: "smartphone",
+    13: "svetocopy",
+    14: "banknotes10",
+    15: "banknotes50",
+    16: "banknotes100",
+    17: "banknotes200",
+    18: "banknotes500",
+    19: "banknotes1000",
+    20: "banknotes2000",
+    21: "banknotes5000",
+    22: "mouse",
+    23: "other",
+}
+
 
 class BanknoteDataset(Dataset):
     """Dataset for banknote detection with FCOS-style target encoding."""
@@ -71,16 +99,25 @@ class BanknoteDataset(Dataset):
             self.transform = self._get_default_transform(split == 'train')
 
     def _build_class_mapping(self):
-        """Build mapping from class names to indices."""
-        # Collect all unique class names
-        all_classes = set()
+        """Build mapping from class IDs to names and indices."""
+        # Collect all unique category IDs from dataset
+        all_category_ids = set()
         for item in self.dataset:
             for obj in item['objects']:
-                all_classes.add(obj['category'])
+                all_category_ids.add(obj['category'])
 
-        self.class_names = sorted(list(all_classes))
+        # Sort category IDs and create mappings
+        sorted_ids = sorted(list(all_category_ids))
+
+        # Map original category IDs to sequential indices (0, 1, 2, ...)
+        # and get proper class names from ID_TO_CLASS_NAME
+        self.category_id_to_idx = {cat_id: idx for idx, cat_id in enumerate(sorted_ids)}
+        self.idx_to_category_id = {idx: cat_id for cat_id, idx in self.category_id_to_idx.items()}
+
+        # Get class names using the ID_TO_CLASS_NAME mapping
+        self.class_names = [ID_TO_CLASS_NAME.get(cat_id, f"class_{cat_id}") for cat_id in sorted_ids]
+        self.idx_to_class = {idx: name for idx, name in enumerate(self.class_names)}
         self.class_to_idx = {name: idx for idx, name in enumerate(self.class_names)}
-        self.idx_to_class = {idx: name for name, idx in self.class_to_idx.items()}
 
         # Update num_classes based on actual data
         self.num_classes = len(self.class_names)
@@ -151,7 +188,7 @@ class BanknoteDataset(Dataset):
                 continue
 
             boxes.append([x1, y1, x2, y2])
-            class_labels.append(self.class_to_idx[obj['category']])
+            class_labels.append(self.category_id_to_idx[obj['category']])
 
         # Apply augmentations
         if len(boxes) > 0:
