@@ -210,7 +210,7 @@ def load_checkpoint(
     scaler: GradScaler
 ) -> tuple:
     """Load checkpoint and return epoch and best_map."""
-    checkpoint = torch.load(checkpoint_path)
+    checkpoint = torch.load(checkpoint_path, weights_only=False)
 
     model.load_state_dict(checkpoint['model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
