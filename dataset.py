@@ -127,6 +127,8 @@ class BanknoteDataset(Dataset):
         if is_train:
             return A.Compose([
                 A.HorizontalFlip(p=0.5),
+                A.RandomScale(scale_limit=0.2, p=0.5),  # Scale 0.8-1.2x
+                A.RandomRotate90(p=0.5),  # Rotate by 90° increments
                 A.ColorJitter(
                     brightness=0.2,
                     contrast=0.2,
@@ -134,7 +136,12 @@ class BanknoteDataset(Dataset):
                     hue=0.1,
                     p=0.5
                 ),
-                A.RandomBrightnessContrast(p=0.3),
+                A.RandomBrightnessContrast(
+                    brightness_limit=0.3,
+                    contrast_limit=0.3,
+                    p=0.5
+                ),
+                A.GaussNoise(var_limit=(10.0, 50.0), p=0.3),  # Add slight noise
             ], bbox_params=A.BboxParams(
                 format='pascal_voc',
                 label_fields=['class_labels'],
