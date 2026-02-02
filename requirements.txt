@@ -1,0 +1,12 @@
+torch>=2.0
+torchvision>=0.15
+datasets
+huggingface_hub
+albumentations
+opencv-python
+tqdm
+tensorboard
+matplotlib
+numpy
+python-dotenv
+Pillow
