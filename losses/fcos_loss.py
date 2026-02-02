@@ -58,7 +58,7 @@ class FCOSLoss(nn.Module):
         reg_outputs: List[torch.Tensor],
         ctr_outputs: List[torch.Tensor],
         targets: List[Dict],
-        compute_fcos_targets_fn
+        image_size: Tuple[int, int]
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Compute FCOS loss.
@@ -68,13 +68,22 @@ class FCOSLoss(nn.Module):
             reg_outputs: List of (B, 4, Hi, Wi) regression predictions (l, t, r, b)
             ctr_outputs: List of (B, 1, Hi, Wi) centerness predictions
             targets: List of target dicts per image with 'boxes' and 'labels'
-            compute_fcos_targets_fn: Function to compute FCOS targets from boxes/labels
+            image_size: (width, height) of input images
 
         Returns:
             Tuple of (total_loss, cls_loss, reg_loss, ctr_loss)
         """
         device = cls_outputs[0].device
         batch_size = cls_outputs[0].shape[0]
+
+        # Size ranges for assigning objects to FPN levels
+        size_ranges = [
+            (0, 64),      # P3: stride 8
+            (64, 128),    # P4: stride 16
+            (128, 256),   # P5: stride 32
+            (256, 512),   # P6: stride 64
+            (512, float('inf'))  # P7: stride 128
+        ]
 
         # Collect all losses
         total_cls_loss = torch.tensor(0.0, device=device)
@@ -87,21 +96,19 @@ class FCOSLoss(nn.Module):
             boxes = targets[batch_idx]['boxes'].to(device)
             labels = targets[batch_idx]['labels'].to(device)
 
-            # Compute FCOS targets
-            fcos_targets = compute_fcos_targets_fn(boxes, labels, device)
-
             for level_idx, stride in enumerate(self.strides):
-                # Get predictions for this level
+                # Get predictions for this level - use actual feature map size
                 cls_pred = cls_outputs[level_idx][batch_idx]  # (C, H, W)
                 reg_pred = reg_outputs[level_idx][batch_idx]  # (4, H, W)
                 ctr_pred = ctr_outputs[level_idx][batch_idx]  # (1, H, W)
 
-                # Get targets for this level
-                cls_target = fcos_targets[level_idx]['cls_targets']  # (H, W)
-                reg_target = fcos_targets[level_idx]['reg_targets']  # (H, W, 4)
-                ctr_target = fcos_targets[level_idx]['ctr_targets']  # (H, W)
-
                 h, w = cls_pred.shape[1:]
+                min_size, max_size = size_ranges[level_idx]
+
+                # Compute targets for this level using actual feature map size
+                cls_target, reg_target, ctr_target = self._compute_targets_for_level(
+                    boxes, labels, h, w, stride, min_size, max_size, device
+                )
 
                 # Flatten predictions
                 cls_pred_flat = cls_pred.permute(1, 2, 0).reshape(-1, self.num_classes)
@@ -133,7 +140,7 @@ class FCOSLoss(nn.Module):
                     shifts_x = torch.arange(0, w, device=device) * stride + stride // 2
                     shifts_y = torch.arange(0, h, device=device) * stride + stride // 2
                     shift_y, shift_x = torch.meshgrid(shifts_y, shifts_x, indexing='ij')
-                    locations = torch.stack([shift_x, shift_y], dim=-1).reshape(-1, 2)
+                    locations = torch.stack([shift_x, shift_y], dim=-1).reshape(-1, 2).float()
                     pos_locations = locations[pos_mask]
 
                     # Decode predicted and target boxes
@@ -168,6 +175,93 @@ class FCOSLoss(nn.Module):
 
         return total_loss, total_cls_loss, total_reg_loss, total_ctr_loss
 
+    def _compute_targets_for_level(
+        self,
+        boxes: torch.Tensor,
+        labels: torch.Tensor,
+        feat_h: int,
+        feat_w: int,
+        stride: int,
+        min_size: float,
+        max_size: float,
+        device: torch.device
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Compute FCOS targets for a single FPN level using actual feature map size.
+
+        Args:
+            boxes: (N, 4) boxes in xyxy format
+            labels: (N,) class labels
+            feat_h: Feature map height
+            feat_w: Feature map width
+            stride: Stride for this FPN level
+            min_size: Minimum object size for this level
+            max_size: Maximum object size for this level
+            device: Device to place tensors on
+
+        Returns:
+            cls_targets: (H, W) class labels (0=bg, 1-C=classes)
+            reg_targets: (H, W, 4) regression targets (l, t, r, b)
+            ctr_targets: (H, W) centerness targets
+        """
+        # Initialize targets
+        cls_targets = torch.zeros((feat_h, feat_w), dtype=torch.long, device=device)
+        reg_targets = torch.zeros((feat_h, feat_w, 4), dtype=torch.float32, device=device)
+        ctr_targets = torch.zeros((feat_h, feat_w), dtype=torch.float32, device=device)
+
+        if len(boxes) == 0:
+            return cls_targets, reg_targets, ctr_targets
+
+        # Create grid of locations
+        shifts_x = torch.arange(0, feat_w, device=device) * stride + stride // 2
+        shifts_y = torch.arange(0, feat_h, device=device) * stride + stride // 2
+        shift_y, shift_x = torch.meshgrid(shifts_y, shifts_x, indexing='ij')
+        locations = torch.stack([shift_x, shift_y], dim=-1).float()  # (H, W, 2)
+
+        # For each box, assign to locations
+        for box_idx in range(len(boxes)):
+            box = boxes[box_idx]
+            label = labels[box_idx].item()
+
+            x1, y1, x2, y2 = box
+
+            # Compute l, t, r, b for all locations
+            l = locations[..., 0] - x1
+            t = locations[..., 1] - y1
+            r = x2 - locations[..., 0]
+            b = y2 - locations[..., 1]
+
+            reg = torch.stack([l, t, r, b], dim=-1)  # (H, W, 4)
+
+            # Check if location is inside the box
+            inside_mask = (l > 0) & (t > 0) & (r > 0) & (b > 0)
+
+            # Check if object should be assigned to this level based on size
+            max_reg = reg.max(dim=-1)[0]
+            size_mask = (max_reg >= min_size) & (max_reg < max_size)
+
+            # Combined mask
+            valid_mask = inside_mask & size_mask
+
+            # Compute centerness
+            lr_min = torch.min(l, r)
+            lr_max = torch.max(l, r)
+            tb_min = torch.min(t, b)
+            tb_max = torch.max(t, b)
+
+            centerness = torch.sqrt(
+                (lr_min / (lr_max + 1e-6)) * (tb_min / (tb_max + 1e-6))
+            )
+
+            # Update locations with higher centerness (prefer center of objects)
+            update_mask = valid_mask & (centerness > ctr_targets)
+
+            cls_targets[update_mask] = label + 1  # 0 is background
+            reg_targets[update_mask] = reg[update_mask]
+            ctr_targets[update_mask] = centerness[update_mask]
+
+        return cls_targets, reg_targets, ctr_targets
+
     def _compute_cls_loss(
         self,
         pred: torch.Tensor,
@@ -200,13 +294,14 @@ class FCOSLoss(nn.Module):
 
         # Create one-hot target (0=bg, 1-C=classes -> 0-C-1 for one-hot)
         # Background (0) means all zeros in one-hot
-        target_one_hot = torch.zeros_like(valid_pred)
+        # Use same dtype as inputs for AMP compatibility
+        target_one_hot = torch.zeros(valid_pred.shape, dtype=valid_pred.dtype, device=valid_pred.device)
         pos_mask = valid_target > 0
         if pos_mask.any():
             pos_indices = valid_target[pos_mask] - 1  # Convert to 0-indexed
             target_one_hot[pos_mask] = F.one_hot(
                 pos_indices, num_classes
-            ).float()
+            ).to(dtype=valid_pred.dtype)
 
         # Compute focal loss
         alpha = 0.25

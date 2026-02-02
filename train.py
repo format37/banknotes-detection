@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
@@ -43,12 +43,12 @@ def train_one_epoch(
     train_loader,
     optimizer,
     loss_fn: FCOSLoss,
-    dataset: BanknoteDataset,
     device: torch.device,
     epoch: int,
     scaler: GradScaler,
     grad_clip: float,
-    writer: SummaryWriter
+    writer: SummaryWriter,
+    image_size: tuple
 ) -> dict:
     """Train for one epoch."""
     model.train()
@@ -67,12 +67,12 @@ def train_one_epoch(
         optimizer.zero_grad()
 
         # Forward pass with AMP
-        with autocast():
+        with autocast('cuda'):
             cls_outputs, reg_outputs, ctr_outputs = model(images)
 
             loss, cls_loss, reg_loss, ctr_loss = loss_fn(
                 cls_outputs, reg_outputs, ctr_outputs, targets,
-                dataset.compute_fcos_targets
+                image_size
             )
 
         # Backward pass with gradient scaling
@@ -313,7 +313,7 @@ def main():
     )
 
     # Create gradient scaler for AMP
-    scaler = GradScaler()
+    scaler = GradScaler('cuda')
 
     # Resume from checkpoint if specified
     start_epoch = 0
@@ -340,8 +340,9 @@ def main():
 
         # Train
         train_metrics = train_one_epoch(
-            model, train_loader, optimizer, loss_fn, train_dataset,
-            device, epoch, scaler, config.get('grad_clip', 1.0), writer
+            model, train_loader, optimizer, loss_fn,
+            device, epoch, scaler, config.get('grad_clip', 1.0), writer,
+            tuple(config['image_size'])
         )
 
         # Update learning rate

@@ -81,7 +81,8 @@ class FocalLoss(nn.Module):
         # Note: targets are 0 for background, 1-C for classes
         target_one_hot = F.one_hot(valid_targets, num_classes + 1)
         # Remove background class from one-hot (we only predict foreground)
-        target_one_hot = target_one_hot[:, 1:].float()  # (N, C)
+        # Use same dtype as inputs for AMP compatibility
+        target_one_hot = target_one_hot[:, 1:].to(dtype=valid_inputs.dtype)  # (N, C)
 
         # Compute focal loss for all classes
         # p_t = p if target=1, else (1-p)
