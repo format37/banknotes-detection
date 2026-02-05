@@ -3,3 +3,4 @@
 outputs/
 benchmark_results/
 inference_results/
+*.mp4
