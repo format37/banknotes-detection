@@ -4,3 +4,7 @@ outputs/
 benchmark_results/
 inference_results/
 *.mp4
+PHASE1_IMPLEMENTATION_SUMMARY.md
+.gitignore
+MEMORY_OPTIMIZATION_FULL_RES.md
+temp/

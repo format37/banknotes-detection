@@ -48,9 +48,10 @@ def train_one_epoch(
     scaler: GradScaler,
     grad_clip: float,
     writer: SummaryWriter,
-    image_size: tuple
+    image_size: tuple,
+    gradient_accumulation_steps: int = 1
 ) -> dict:
-    """Train for one epoch."""
+    """Train for one epoch with optional gradient accumulation."""
     model.train()
 
     total_loss = 0.0
@@ -64,8 +65,6 @@ def train_one_epoch(
     for batch_idx, (images, targets) in enumerate(pbar):
         images = images.to(device)
 
-        optimizer.zero_grad()
-
         # Forward pass with AMP
         with autocast('cuda'):
             cls_outputs, reg_outputs, ctr_outputs = model(images)
@@ -75,15 +74,21 @@ def train_one_epoch(
                 image_size
             )
 
+            # Scale loss by accumulation steps for correct averaging
+            loss = loss / gradient_accumulation_steps
+
         # Backward pass with gradient scaling
         scaler.scale(loss).backward()
 
-        # Gradient clipping
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        # Only update weights every N accumulation steps
+        if (batch_idx + 1) % gradient_accumulation_steps == 0 or (batch_idx + 1) == len(train_loader):
+            # Gradient clipping
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
-        scaler.step(optimizer)
-        scaler.update()
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
 
         # Accumulate losses
         total_loss += loss.item()
@@ -248,18 +253,26 @@ def main():
 
     # Create dataloaders
     print('Loading datasets...')
-    train_loader, val_loader = get_dataloaders(
+    merge_banknotes = config.get('merge_banknotes', True)
+    train_loader, val_loader, test_loader = get_dataloaders(
         config_path=args.config,
-        num_workers=args.num_workers
+        num_workers=args.num_workers,
+        merge_banknotes=merge_banknotes
     )
     train_dataset = train_loader.dataset
 
     print(f'Training samples: {len(train_dataset)}')
     print(f'Validation samples: {len(val_loader.dataset)}')
+    print(f'Test samples: {len(test_loader.dataset)}')
     print(f'Number of classes: {train_dataset.num_classes}')
 
     # Update config with actual number of classes
     config['num_classes'] = train_dataset.num_classes
+
+    # Compute class weights for handling imbalance
+    print('Computing class weights...')
+    class_weights = train_dataset.compute_class_weights().to(device)
+    print(f'Class weights (min={class_weights.min():.2f}, max={class_weights.max():.2f}, mean={class_weights.mean():.2f})')
 
     # Create model
     print('Creating model...')
@@ -269,29 +282,58 @@ def main():
         strides=config['strides'],
         score_threshold=config.get('score_threshold', 0.05),
         nms_threshold=config.get('nms_threshold', 0.5),
-        max_detections=config.get('max_detections', 100)
+        max_detections=config.get('max_detections', 100),
+        backbone_type=config.get('backbone_type', 'resnet18'),
+        pretrained=config.get('use_pretrained', False)
     )
     model = model.to(device)
 
     total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f'Total parameters: {total_params:,}')
+    print(f'Trainable parameters: {trainable_params:,}')
+    print(f'Backbone: {config.get("backbone_type", "resnet18")} (pretrained: {config.get("use_pretrained", False)})')
 
-    # Create loss function
+    # Optionally freeze backbone for initial epochs
+    freeze_backbone_epochs = config.get('freeze_backbone_epochs', 0)
+    if freeze_backbone_epochs > 0:
+        print(f'Freezing backbone for first {freeze_backbone_epochs} epochs')
+        for param in model.backbone.parameters():
+            param.requires_grad = False
+
+    # Enable gradient checkpointing to save memory
+    use_checkpointing = config.get('use_gradient_checkpointing', False)
+    if use_checkpointing:
+        print('Enabling gradient checkpointing (trades compute for memory)')
+        from apply_gradient_checkpointing import apply_gradient_checkpointing
+        model = apply_gradient_checkpointing(model)
+
+    # Create loss function with class weights
     loss_fn = FCOSLoss(
         num_classes=config['num_classes'],
         focal_alpha=config.get('focal_alpha', 0.25),
         focal_gamma=config.get('focal_gamma', 2.0),
         lambda_reg=config.get('lambda_reg', 1.0),
         lambda_ctr=config.get('lambda_ctr', 1.0),
-        strides=config['strides']
+        strides=config['strides'],
+        class_weights=class_weights
     )
 
-    # Create optimizer
+    # Create optimizer with differential learning rates
+    backbone_lr = config.get('backbone_lr', config['lr'])
+    main_lr = config['lr']
+
+    param_groups = [
+        {'params': model.backbone.parameters(), 'lr': backbone_lr, 'name': 'backbone'},
+        {'params': model.fpn.parameters(), 'lr': main_lr, 'name': 'fpn'},
+        {'params': model.head.parameters(), 'lr': main_lr, 'name': 'head'}
+    ]
+
     optimizer = AdamW(
-        model.parameters(),
-        lr=config['lr'],
+        param_groups,
         weight_decay=config['weight_decay']
     )
+    print(f'Learning rates: backbone={backbone_lr:.2e}, head/fpn={main_lr:.2e}')
 
     # Create learning rate scheduler (warmup + cosine annealing)
     warmup_epochs = config.get('warmup_epochs', 3)
@@ -338,16 +380,27 @@ def main():
     for epoch in range(start_epoch, config['epochs']):
         epoch_start = time.time()
 
+        # Unfreeze backbone after specified epochs
+        freeze_backbone_epochs = config.get('freeze_backbone_epochs', 0)
+        if freeze_backbone_epochs > 0 and epoch == freeze_backbone_epochs:
+            print(f'\nUnfreezing backbone at epoch {epoch}')
+            for param in model.backbone.parameters():
+                param.requires_grad = True
+
         # Train
         train_metrics = train_one_epoch(
             model, train_loader, optimizer, loss_fn,
             device, epoch, scaler, config.get('grad_clip', 1.0), writer,
-            tuple(config['image_size'])
+            tuple(config['image_size']),
+            gradient_accumulation_steps=config.get('gradient_accumulation_steps', 1)
         )
 
         # Update learning rate
         scheduler.step()
         current_lr = optimizer.param_groups[0]['lr']
+
+        # Free GPU memory before evaluation
+        torch.cuda.empty_cache()
 
         # Evaluate
         val_metrics = evaluate(model, val_loader, device, config['num_classes'])
@@ -383,6 +436,9 @@ def main():
             model, optimizer, scheduler, scaler,
             epoch, best_map, config, output_dir, is_best
         )
+
+        # Free GPU memory after checkpoint save
+        torch.cuda.empty_cache()
 
         # Early stopping
         if no_improve_count >= patience:

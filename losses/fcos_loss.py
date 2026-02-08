@@ -30,7 +30,8 @@ class FCOSLoss(nn.Module):
         focal_gamma: float = 2.0,
         lambda_reg: float = 1.0,
         lambda_ctr: float = 1.0,
-        strides: List[int] = None
+        strides: List[int] = None,
+        class_weights: torch.Tensor = None
     ):
         """
         Args:
@@ -40,6 +41,7 @@ class FCOSLoss(nn.Module):
             lambda_reg: Weight for regression loss
             lambda_ctr: Weight for centerness loss
             strides: FPN strides for each level
+            class_weights: Optional per-class weights for handling imbalance
         """
         super().__init__()
 
@@ -49,7 +51,7 @@ class FCOSLoss(nn.Module):
         self.strides = strides or [8, 16, 32, 64, 128]
 
         # Loss functions
-        self.focal_loss = FocalLoss(alpha=focal_alpha, gamma=focal_gamma)
+        self.focal_loss = FocalLoss(alpha=focal_alpha, gamma=focal_gamma, class_weights=class_weights)
         self.giou_loss = GIoULoss(reduction='sum')
 
     def forward(

@@ -1,10 +1,12 @@
 """
-ResNet-18 backbone implementation from scratch.
+ResNet backbone implementations for FCOS.
+Supports ResNet-18 (from scratch) and ResNet-50 (with pretrained weights).
 Extracts multi-scale features for use with FPN.
 """
 
 import torch
 import torch.nn as nn
+import torchvision.models as models
 from typing import List, Tuple
 
 
@@ -151,20 +153,117 @@ class ResNet18(nn.Module):
         return [c2, c3, c4, c5]
 
 
-if __name__ == "__main__":
-    # Test backbone
-    model = ResNet18()
-    print(f"ResNet-18 backbone created")
-    print(f"Output channels: {model.out_channels}")
+class ResNet50(nn.Module):
+    """
+    ResNet-50 backbone wrapper for torchvision pretrained models.
 
-    # Test forward pass
+    Returns features at 4 scales (C2, C3, C4, C5) with strides [4, 8, 16, 32].
+    Channel dimensions: [256, 512, 1024, 2048]
+    """
+
+    def __init__(self, pretrained: bool = True):
+        """
+        Args:
+            pretrained: If True, load ImageNet pretrained weights
+        """
+        super().__init__()
+
+        # Load pretrained or random ResNet-50
+        if pretrained:
+            weights = models.ResNet50_Weights.IMAGENET1K_V2
+            resnet = models.resnet50(weights=weights)
+        else:
+            resnet = models.resnet50(weights=None)
+
+        # Extract layers
+        self.conv1 = resnet.conv1
+        self.bn1 = resnet.bn1
+        self.relu = resnet.relu
+        self.maxpool = resnet.maxpool
+
+        self.layer1 = resnet.layer1  # C2: 256 channels, stride 4
+        self.layer2 = resnet.layer2  # C3: 512 channels, stride 8
+        self.layer3 = resnet.layer3  # C4: 1024 channels, stride 16
+        self.layer4 = resnet.layer4  # C5: 2048 channels, stride 32
+
+        # Output channel dimensions
+        self.out_channels = [256, 512, 1024, 2048]
+
+    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
+        """
+        Forward pass returning multi-scale features.
+
+        Args:
+            x: Input tensor of shape (B, 3, H, W)
+
+        Returns:
+            List of feature maps [C2, C3, C4, C5] with strides [4, 8, 16, 32]
+        """
+        # Stem
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+
+        # Residual blocks
+        c2 = self.layer1(x)   # stride 4, 256 channels
+        c3 = self.layer2(c2)  # stride 8, 512 channels
+        c4 = self.layer3(c3)  # stride 16, 1024 channels
+        c5 = self.layer4(c4)  # stride 32, 2048 channels
+
+        return [c2, c3, c4, c5]
+
+
+class BackboneFactory:
+    """Factory for creating backbone networks."""
+
+    @staticmethod
+    def create_backbone(backbone_type: str = 'resnet50', pretrained: bool = True):
+        """
+        Create a backbone network.
+
+        Args:
+            backbone_type: 'resnet18' or 'resnet50'
+            pretrained: If True and using resnet50, load ImageNet pretrained weights
+
+        Returns:
+            Backbone module with .out_channels attribute
+        """
+        if backbone_type == 'resnet50':
+            return ResNet50(pretrained=pretrained)
+        elif backbone_type == 'resnet18':
+            return ResNet18()
+        else:
+            raise ValueError(f"Unknown backbone type: {backbone_type}. "
+                           f"Supported: 'resnet18', 'resnet50'")
+
+
+if __name__ == "__main__":
+    # Test ResNet-18
+    print("Testing ResNet-18:")
+    model = ResNet18()
+    print(f"  Output channels: {model.out_channels}")
     x = torch.randn(2, 3, 1080, 1920)
     features = model(x)
-
-    print("\nFeature map shapes:")
+    print("  Feature map shapes:")
     for i, feat in enumerate(features):
-        print(f"  C{i+2}: {feat.shape}")
-
-    # Count parameters
+        print(f"    C{i+2}: {feat.shape}")
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"\nTotal parameters: {total_params:,}")
+    print(f"  Total parameters: {total_params:,}")
+
+    # Test ResNet-50
+    print("\nTesting ResNet-50 (pretrained):")
+    model = ResNet50(pretrained=True)
+    print(f"  Output channels: {model.out_channels}")
+    features = model(x)
+    print("  Feature map shapes:")
+    for i, feat in enumerate(features):
+        print(f"    C{i+2}: {feat.shape}")
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"  Total parameters: {total_params:,}")
+
+    # Test factory
+    print("\nTesting BackboneFactory:")
+    backbone = BackboneFactory.create_backbone('resnet50', pretrained=True)
+    print(f"  Created: {type(backbone).__name__}")
+    print(f"  Output channels: {backbone.out_channels}")

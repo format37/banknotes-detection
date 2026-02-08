@@ -24,18 +24,22 @@ class FocalLoss(nn.Module):
         self,
         alpha: float = 0.25,
         gamma: float = 2.0,
-        reduction: str = 'mean'
+        reduction: str = 'mean',
+        class_weights: torch.Tensor = None
     ):
         """
         Args:
             alpha: Weighting factor for positive class (default: 0.25)
             gamma: Focusing parameter (default: 2.0)
             reduction: 'mean', 'sum', or 'none'
+            class_weights: Optional per-class weights of shape (num_classes,)
+                          for handling class imbalance
         """
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
         self.reduction = reduction
+        self.register_buffer('class_weights', class_weights)
 
     def forward(
         self,
@@ -101,6 +105,20 @@ class FocalLoss(nn.Module):
 
         # Apply focal weighting
         loss = alpha_t * focal_weight * bce
+
+        # Apply class weights if provided
+        if self.class_weights is not None:
+            # Get class weight for each sample (targets are 0=background, 1-C=classes)
+            # For background (target=0), use weight of 1.0
+            class_weight_per_sample = torch.ones(valid_targets.shape[0], device=loss.device)
+            positive_mask = valid_targets > 0
+            if positive_mask.any():
+                # Map target indices (1-C) to class indices (0-C-1)
+                class_indices = valid_targets[positive_mask] - 1
+                class_weight_per_sample[positive_mask] = self.class_weights[class_indices]
+            # Expand to match loss shape (N, C) and apply
+            class_weight_per_sample = class_weight_per_sample.unsqueeze(1).expand_as(loss)
+            loss = loss * class_weight_per_sample
 
         # Sum over classes, then reduce
         loss = loss.sum(dim=1)

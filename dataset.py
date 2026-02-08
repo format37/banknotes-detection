@@ -6,6 +6,7 @@ Loads from HuggingFace Hub and prepares FCOS-style targets.
 import json
 import os
 from typing import Dict, List, Tuple, Optional
+from collections import defaultdict
 
 import albumentations as A
 import cv2
@@ -46,6 +47,21 @@ ID_TO_CLASS_NAME = {
     23: "other",
 }
 
+# Mapping for merging banknote classes
+# All specific denominations map to generic "banknotes" class
+BANKNOTE_MERGE_MAP = {
+    3: "banknotes",      # banknotes (generic)
+    4: "banknotes",      # banknotes_batch
+    14: "banknotes",     # banknotes10
+    15: "banknotes",     # banknotes50
+    16: "banknotes",     # banknotes100
+    17: "banknotes",     # banknotes200
+    18: "banknotes",     # banknotes500
+    19: "banknotes",     # banknotes1000
+    20: "banknotes",     # banknotes2000
+    21: "banknotes",     # banknotes5000
+}
+
 
 class BanknoteDataset(Dataset):
     """Dataset for banknote detection with FCOS-style target encoding."""
@@ -54,13 +70,23 @@ class BanknoteDataset(Dataset):
         self,
         split: str = "train",
         config_path: str = "config.json",
-        transform: Optional[A.Compose] = None
+        transform: Optional[A.Compose] = None,
+        train_ratio: float = 0.7,
+        val_ratio: float = 0.15,
+        test_ratio: float = 0.15,
+        random_seed: int = 42,
+        merge_banknotes: bool = True
     ):
         """
         Args:
-            split: 'train' or 'test'
+            split: 'train', 'val', or 'test'
             config_path: Path to config.json
             transform: Albumentations transform pipeline
+            train_ratio: Ratio for training set (default: 0.7)
+            val_ratio: Ratio for validation set (default: 0.15)
+            test_ratio: Ratio for test set (default: 0.15)
+            random_seed: Random seed for reproducible splits
+            merge_banknotes: If True, merge all banknote classes into one (default: True)
         """
         with open(config_path, 'r') as f:
             self.config = json.load(f)
@@ -70,6 +96,7 @@ class BanknoteDataset(Dataset):
         self.num_classes = self.config['num_classes']
         self.strides = self.config['strides']
         self.fpn_channels = self.config['fpn_channels']
+        self.merge_banknotes = merge_banknotes
 
         # Size ranges for assigning objects to FPN levels
         # Objects are assigned based on their max(l, t, r, b) distance
@@ -81,15 +108,44 @@ class BanknoteDataset(Dataset):
             (512, float('inf'))  # P7: stride 128
         ]
 
-        # Load dataset from HuggingFace
+        # Load and concatenate both train and test from HuggingFace
         hf_token = os.getenv('HF_TOKEN')
-        self.dataset = load_dataset(
+        print(f"Loading complete dataset from HuggingFace...")
+
+        train_dataset = load_dataset(
             self.config['hf_dataset'],
-            split=split,
+            split='train',
+            token=hf_token
+        )
+        test_dataset = load_dataset(
+            self.config['hf_dataset'],
+            split='test',
             token=hf_token
         )
 
-        # Build class mapping
+        # Concatenate train and test
+        from datasets import concatenate_datasets
+        full_dataset = concatenate_datasets([train_dataset, test_dataset])
+        print(f"  Total images: {len(full_dataset)} (train: {len(train_dataset)}, test: {len(test_dataset)})")
+
+        # Create custom train/val/test split
+        train_idx, val_idx, test_idx = self._create_custom_split(
+            full_dataset, train_ratio, val_ratio, test_ratio, random_seed
+        )
+
+        # Select subset based on split
+        if split == 'train':
+            self.dataset = full_dataset.select(train_idx)
+        elif split == 'val':
+            self.dataset = full_dataset.select(val_idx)
+        elif split == 'test':
+            self.dataset = full_dataset.select(test_idx)
+        else:
+            raise ValueError(f"Unknown split: {split}")
+
+        print(f"  Split '{split}': {len(self.dataset)} images")
+
+        # Build class mapping (with optional merging)
         self._build_class_mapping()
 
         # Setup transforms
@@ -98,54 +154,260 @@ class BanknoteDataset(Dataset):
         else:
             self.transform = self._get_default_transform(split == 'train')
 
+    def _create_custom_split(
+        self,
+        dataset,
+        train_ratio: float = 0.7,
+        val_ratio: float = 0.15,
+        test_ratio: float = 0.15,
+        random_seed: int = 42
+    ):
+        """
+        Create custom train/val/test split from complete dataset.
+
+        Args:
+            dataset: Full HuggingFace dataset
+            train_ratio: Proportion for training (default: 0.7)
+            val_ratio: Proportion for validation (default: 0.15)
+            test_ratio: Proportion for test (default: 0.15)
+            random_seed: Random seed for reproducibility
+
+        Returns:
+            train_idx, val_idx, test_idx: Lists of indices for each split
+        """
+        from sklearn.model_selection import train_test_split
+
+        # Validate ratios
+        assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, \
+            f"Ratios must sum to 1.0, got {train_ratio + val_ratio + test_ratio}"
+
+        # Get labels for stratification (use first object's category, merged if applicable)
+        indices = list(range(len(dataset)))
+        labels = []
+        for item in dataset:
+            if len(item['objects']) > 0:
+                cat_id = item['objects'][0]['category']
+                # Apply merging if enabled
+                if self.merge_banknotes and cat_id in BANKNOTE_MERGE_MAP:
+                    labels.append('banknotes')  # Use string label for merged class
+                else:
+                    labels.append(cat_id)
+            else:
+                labels.append(-1)
+
+        # First split: separate out test set
+        train_val_idx, test_idx = train_test_split(
+            indices,
+            test_size=test_ratio,
+            stratify=labels,
+            random_state=random_seed
+        )
+
+        # Second split: separate train and val from remaining data
+        # Adjust val_ratio to account for already removed test set
+        adjusted_val_ratio = val_ratio / (train_ratio + val_ratio)
+
+        train_val_labels = [labels[i] for i in train_val_idx]
+        train_idx, val_idx = train_test_split(
+            train_val_idx,
+            test_size=adjusted_val_ratio,
+            stratify=train_val_labels,
+            random_state=random_seed
+        )
+
+        print(f"  Custom split: train={len(train_idx)}, val={len(val_idx)}, test={len(test_idx)}")
+        print(f"  Ratios: {len(train_idx)/len(indices):.1%} / {len(val_idx)/len(indices):.1%} / {len(test_idx)/len(indices):.1%}")
+
+        return train_idx, val_idx, test_idx
+
+    def _create_train_val_split(self, train_dataset, val_ratio=0.2, random_seed=42):
+        """
+        Split HF train dataset into train/val using stratified sampling when possible.
+        Falls back to random split for classes with too few samples.
+
+        Args:
+            train_dataset: HuggingFace dataset to split
+            val_ratio: Ratio of data to use for validation
+            random_seed: Random seed for reproducibility
+
+        Returns:
+            train_idx, val_idx: Lists of indices for train and validation sets
+        """
+        from sklearn.model_selection import train_test_split
+        from collections import Counter
+
+        # Get all indices and their labels (use first object's category)
+        indices = list(range(len(train_dataset)))
+        labels = []
+        for item in train_dataset:
+            if len(item['objects']) > 0:
+                labels.append(item['objects'][0]['category'])
+            else:
+                labels.append(-1)  # Images with no objects
+
+        # Check class distribution
+        class_counts = Counter(labels)
+
+        # Try stratified split, but if some classes have < 2 samples, use random split
+        try:
+            # Stratified split to maintain class distribution
+            train_idx, val_idx = train_test_split(
+                indices,
+                test_size=val_ratio,
+                stratify=labels,
+                random_state=random_seed
+            )
+        except ValueError as e:
+            # Some classes have too few samples for stratification
+            # Fall back to random split
+            print(f"Warning: Cannot use stratified split (some classes have < 2 samples)")
+            print(f"  Falling back to random split")
+            train_idx, val_idx = train_test_split(
+                indices,
+                test_size=val_ratio,
+                random_state=random_seed,
+                shuffle=True
+            )
+
+        return train_idx, val_idx
+
     def _build_class_mapping(self):
-        """Build mapping from class IDs to names and indices."""
+        """Build mapping from class IDs to names and indices, with optional banknote merging."""
         # Collect all unique category IDs from dataset
         all_category_ids = set()
         for item in self.dataset:
             for obj in item['objects']:
-                all_category_ids.add(obj['category'])
+                cat_id = obj['category']
+                all_category_ids.add(cat_id)
 
-        # Sort category IDs and create mappings
-        sorted_ids = sorted(list(all_category_ids))
+        # Apply merging if enabled
+        if self.merge_banknotes:
+            # Create merged class names
+            merged_class_names = set()
+            original_to_merged = {}
 
-        # Map original category IDs to sequential indices (0, 1, 2, ...)
-        # and get proper class names from ID_TO_CLASS_NAME
-        self.category_id_to_idx = {cat_id: idx for idx, cat_id in enumerate(sorted_ids)}
-        self.idx_to_category_id = {idx: cat_id for cat_id, idx in self.category_id_to_idx.items()}
+            for cat_id in all_category_ids:
+                if cat_id in BANKNOTE_MERGE_MAP:
+                    merged_name = BANKNOTE_MERGE_MAP[cat_id]
+                    merged_class_names.add(merged_name)
+                    original_to_merged[cat_id] = merged_name
+                else:
+                    class_name = ID_TO_CLASS_NAME.get(cat_id, f"class_{cat_id}")
+                    merged_class_names.add(class_name)
+                    original_to_merged[cat_id] = class_name
 
-        # Get class names using the ID_TO_CLASS_NAME mapping
-        self.class_names = [ID_TO_CLASS_NAME.get(cat_id, f"class_{cat_id}") for cat_id in sorted_ids]
-        self.idx_to_class = {idx: name for idx, name in enumerate(self.class_names)}
-        self.class_to_idx = {name: idx for idx, name in enumerate(self.class_names)}
+            # Create sorted list of unique class names
+            self.class_names = sorted(list(merged_class_names))
+            self.class_to_idx = {name: idx for idx, name in enumerate(self.class_names)}
+            self.idx_to_class = {idx: name for name, idx in self.class_to_idx.items()}
+
+            # Map original category IDs to merged class indices
+            self.category_id_to_idx = {
+                cat_id: self.class_to_idx[original_to_merged[cat_id]]
+                for cat_id in all_category_ids
+            }
+            self.idx_to_category_id = None  # Not meaningful with merging
+
+            print(f"  Classes after merging: {self.class_names}")
+            print(f"  Total classes: {len(self.class_names)}")
+
+        else:
+            # Original behavior without merging
+            sorted_ids = sorted(list(all_category_ids))
+
+            self.category_id_to_idx = {cat_id: idx for idx, cat_id in enumerate(sorted_ids)}
+            self.idx_to_category_id = {idx: cat_id for cat_id, idx in self.category_id_to_idx.items()}
+
+            self.class_names = [ID_TO_CLASS_NAME.get(cat_id, f"class_{cat_id}") for cat_id in sorted_ids]
+            self.idx_to_class = {idx: name for idx, name in enumerate(self.class_names)}
+            self.class_to_idx = {name: idx for idx, name in enumerate(self.class_names)}
 
         # Update num_classes based on actual data
         self.num_classes = len(self.class_names)
 
+    def compute_class_weights(self, method='inverse_freq'):
+        """
+        Compute per-class weights based on class frequency to handle imbalance.
+
+        Args:
+            method: 'inverse_freq' for inverse frequency weighting
+
+        Returns:
+            Tensor of shape (num_classes,) with per-class weights
+        """
+        # Count occurrences of each class
+        class_counts = defaultdict(int)
+        for item in self.dataset:
+            for obj in item['objects']:
+                class_idx = self.category_id_to_idx[obj['category']]
+                class_counts[class_idx] += 1
+
+        # Compute inverse frequency weights
+        total = sum(class_counts.values())
+        weights = torch.zeros(self.num_classes)
+        for cls_idx in range(self.num_classes):
+            count = class_counts.get(cls_idx, 1)  # Avoid division by zero
+            weights[cls_idx] = total / (self.num_classes * count)
+
+        # Normalize weights to have mean 1.0, then clamp to [0.5, 2.0]
+        # This prevents extreme weights from destabilizing training
+        weights = weights / weights.mean()
+        weights = torch.clamp(weights, 0.5, 2.0)
+
+        return weights
+
     def _get_default_transform(self, is_train: bool) -> A.Compose:
-        """Get default augmentation pipeline."""
+        """Get default augmentation pipeline with aggressive realistic transforms."""
         if is_train:
             return A.Compose([
+                # Geometric transforms - realistic for banknote detection
                 A.HorizontalFlip(p=0.5),
-                A.RandomScale(scale_limit=0.2, p=0.5),  # Scale 0.8-1.2x
-                A.RandomRotate90(p=0.5),  # Rotate by 90° increments
-                A.ColorJitter(
-                    brightness=0.2,
-                    contrast=0.2,
-                    saturation=0.2,
-                    hue=0.1,
-                    p=0.5
+                A.VerticalFlip(p=0.3),
+                A.Rotate(limit=30, p=0.7),  # Realistic rotation ±30°
+                A.ShiftScaleRotate(
+                    shift_limit=0.1,
+                    scale_limit=0.3,  # More aggressive: 0.7-1.3x
+                    rotate_limit=15,
+                    p=0.6
                 ),
+                A.Perspective(scale=(0.05, 0.15), p=0.4),  # Camera perspective
+                A.ElasticTransform(alpha=1, sigma=50, p=0.2),  # Deformation
+
+                # Photometric transforms - simulate different lighting conditions
                 A.RandomBrightnessContrast(
-                    brightness_limit=0.3,
-                    contrast_limit=0.3,
+                    brightness_limit=0.4,  # More aggressive
+                    contrast_limit=0.4,
+                    p=0.7
+                ),
+                A.HueSaturationValue(
+                    hue_shift_limit=15,
+                    sat_shift_limit=30,
+                    val_shift_limit=20,
                     p=0.5
                 ),
-                A.GaussNoise(var_limit=(10.0, 50.0), p=0.3),  # Add slight noise
+                A.RandomGamma(gamma_limit=(70, 130), p=0.3),
+                A.CLAHE(clip_limit=4.0, p=0.3),  # Adaptive histogram equalization
+
+                # Noise and blur - simulate camera artifacts
+                A.OneOf([
+                    A.GaussNoise(var_limit=(10.0, 80.0), mean=0, per_channel=True, p=1.0),
+                    A.GaussianBlur(blur_limit=(3, 7), p=1.0),
+                    A.MotionBlur(blur_limit=5, p=1.0),
+                ], p=0.3),
+
+                # Cutout/Coarse Dropout - simulate occlusion
+                A.CoarseDropout(
+                    num_holes_range=(1, 3),
+                    hole_height_range=(30, 60),
+                    hole_width_range=(30, 60),
+                    fill_value=0,
+                    p=0.3
+                ),
             ], bbox_params=A.BboxParams(
                 format='pascal_voc',
                 label_fields=['class_labels'],
-                min_visibility=0.3
+                min_visibility=0.3,
+                min_area=100  # Filter tiny boxes after augmentation
             ))
         else:
             return A.Compose([], bbox_params=A.BboxParams(
@@ -352,19 +614,42 @@ def collate_fn(batch: List[Tuple[torch.Tensor, Dict]]) -> Tuple[torch.Tensor, Li
 
 def get_dataloaders(
     config_path: str = "config.json",
-    num_workers: int = 4
-) -> Tuple[DataLoader, DataLoader]:
-    """Create train and validation dataloaders."""
+    num_workers: int = 4,
+    merge_banknotes: bool = True
+) -> Tuple[DataLoader, DataLoader, DataLoader]:
+    """Create train, validation, and test dataloaders."""
     with open(config_path, 'r') as f:
         config = json.load(f)
 
-    train_dataset = BanknoteDataset(split='train', config_path=config_path)
-    test_dataset = BanknoteDataset(split='test', config_path=config_path)
+    train_dataset = BanknoteDataset(
+        split='train',
+        config_path=config_path,
+        merge_banknotes=merge_banknotes
+    )
+    val_dataset = BanknoteDataset(
+        split='val',
+        config_path=config_path,
+        merge_banknotes=merge_banknotes
+    )
+    test_dataset = BanknoteDataset(
+        split='test',
+        config_path=config_path,
+        merge_banknotes=merge_banknotes
+    )
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=config['batch_size'],
         shuffle=True,
+        num_workers=num_workers,
+        collate_fn=collate_fn,
+        pin_memory=True
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config['batch_size'],
+        shuffle=False,
         num_workers=num_workers,
         collate_fn=collate_fn,
         pin_memory=True
@@ -379,7 +664,7 @@ def get_dataloaders(
         pin_memory=True
     )
 
-    return train_loader, test_loader
+    return train_loader, val_loader, test_loader
 
 
 if __name__ == "__main__":
@@ -408,7 +693,10 @@ if __name__ == "__main__":
 
     # Test dataloader
     print("\nTesting dataloader...")
-    train_loader, test_loader = get_dataloaders()
+    train_loader, val_loader, test_loader = get_dataloaders()
+    print(f"Train batches: {len(train_loader)}")
+    print(f"Val batches: {len(val_loader)}")
+    print(f"Test batches: {len(test_loader)}")
     images, targets = next(iter(train_loader))
     print(f"Batch images shape: {images.shape}")
     print(f"Batch size: {len(targets)}")

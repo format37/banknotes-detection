@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 from typing import List, Dict, Tuple, Optional
 
-from .backbone import ResNet18
+from .backbone import ResNet18, BackboneFactory
 from .fpn import FPN
 from .head import FCOSHead
 
@@ -28,7 +28,10 @@ class FCOS(nn.Module):
         strides: List[int] = None,
         score_threshold: float = 0.05,
         nms_threshold: float = 0.5,
-        max_detections: int = 100
+        max_detections: int = 100,
+        backbone: nn.Module = None,
+        backbone_type: str = 'resnet18',
+        pretrained: bool = False
     ):
         """
         Args:
@@ -38,6 +41,9 @@ class FCOS(nn.Module):
             score_threshold: Minimum score for detection
             nms_threshold: IoU threshold for NMS
             max_detections: Maximum detections per image
+            backbone: Optional pre-built backbone module
+            backbone_type: Type of backbone ('resnet18' or 'resnet50') if backbone is None
+            pretrained: If True, use pretrained weights (only for resnet50)
         """
         super().__init__()
 
@@ -49,7 +55,11 @@ class FCOS(nn.Module):
         self.max_detections = max_detections
 
         # Build network components
-        self.backbone = ResNet18()
+        if backbone is not None:
+            self.backbone = backbone
+        else:
+            self.backbone = BackboneFactory.create_backbone(backbone_type, pretrained)
+
         self.fpn = FPN(
             in_channels_list=self.backbone.out_channels,
             out_channels=fpn_channels
