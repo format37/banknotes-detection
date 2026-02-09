@@ -130,11 +130,11 @@ def train_one_epoch(
 @torch.no_grad()
 def evaluate(
     model: nn.Module,
-    val_loader,
+    test_loader,
     device: torch.device,
     num_classes: int
 ) -> dict:
-    """Evaluate model on validation set."""
+    """Evaluate model on test set."""
     model.eval()
 
     all_pred_boxes = []
@@ -143,7 +143,7 @@ def evaluate(
     all_gt_boxes = []
     all_gt_labels = []
 
-    for images, targets in tqdm(val_loader, desc='Evaluating'):
+    for images, targets in tqdm(test_loader, desc='Evaluating'):
         images = images.to(device)
 
         # Run inference
@@ -254,7 +254,7 @@ def main():
     # Create dataloaders
     print('Loading datasets...')
     merge_banknotes = config.get('merge_banknotes', True)
-    train_loader, val_loader, test_loader = get_dataloaders(
+    train_loader, test_loader = get_dataloaders(
         config_path=args.config,
         num_workers=args.num_workers,
         merge_banknotes=merge_banknotes
@@ -262,7 +262,6 @@ def main():
     train_dataset = train_loader.dataset
 
     print(f'Training samples: {len(train_dataset)}')
-    print(f'Validation samples: {len(val_loader.dataset)}')
     print(f'Test samples: {len(test_loader.dataset)}')
     print(f'Number of classes: {train_dataset.num_classes}')
 
@@ -403,7 +402,7 @@ def main():
         torch.cuda.empty_cache()
 
         # Evaluate
-        val_metrics = evaluate(model, val_loader, device, config['num_classes'])
+        test_metrics = evaluate(model, test_loader, device, config['num_classes'])
 
         epoch_time = time.time() - epoch_start
 
@@ -413,20 +412,20 @@ def main():
               f'Cls: {train_metrics["cls_loss"]:.4f}, '
               f'Reg: {train_metrics["reg_loss"]:.4f}, '
               f'Ctr: {train_metrics["ctr_loss"]:.4f}')
-        print(f'  Val - mAP@0.5: {val_metrics["mAP@0.5"]:.4f}, '
-              f'mAP@0.5:0.95: {val_metrics["mAP@0.5:0.95"]:.4f}')
+        print(f'  Test - mAP@0.5: {test_metrics["mAP@0.5"]:.4f}, '
+              f'mAP@0.5:0.95: {test_metrics["mAP@0.5:0.95"]:.4f}')
         print(f'  LR: {current_lr:.6f}')
 
         # Log to TensorBoard
         writer.add_scalar('train/epoch_loss', train_metrics['loss'], epoch)
-        writer.add_scalar('val/mAP_0.5', val_metrics['mAP@0.5'], epoch)
-        writer.add_scalar('val/mAP_0.5_0.95', val_metrics['mAP@0.5:0.95'], epoch)
+        writer.add_scalar('test/mAP_0.5', test_metrics['mAP@0.5'], epoch)
+        writer.add_scalar('test/mAP_0.5_0.95', test_metrics['mAP@0.5:0.95'], epoch)
         writer.add_scalar('lr', current_lr, epoch)
 
         # Check for improvement
-        is_best = val_metrics['mAP@0.5'] > best_map
+        is_best = test_metrics['mAP@0.5'] > best_map
         if is_best:
-            best_map = val_metrics['mAP@0.5']
+            best_map = test_metrics['mAP@0.5']
             no_improve_count = 0
         else:
             no_improve_count += 1

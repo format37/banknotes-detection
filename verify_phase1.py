@@ -10,25 +10,23 @@ from dataset import BanknoteDataset, get_dataloaders
 from model import FCOS, BackboneFactory
 from losses import FCOSLoss
 
-def test_train_val_split():
-    """Test that train/val split works correctly."""
+def test_train_test_split():
+    """Test that train/test split works correctly."""
     print("=" * 60)
-    print("Test 1: Train/Val/Test Split")
+    print("Test 1: Train/Test Split")
     print("=" * 60)
 
     train_dataset = BanknoteDataset(split='train')
-    val_dataset = BanknoteDataset(split='val')
     test_dataset = BanknoteDataset(split='test')
 
     print(f"✓ Train samples: {len(train_dataset)}")
-    print(f"✓ Val samples: {len(val_dataset)}")
     print(f"✓ Test samples: {len(test_dataset)}")
 
-    # Check that train + val = original train set (694)
-    total = len(train_dataset) + len(val_dataset)
-    expected = 694
-    assert abs(total - expected) < 5, f"Train+Val should be ~{expected}, got {total}"
-    print(f"✓ Train + Val = {total} (expected ~{expected})")
+    # Check total = 1001 (694 HF train + 307 HF test)
+    total = len(train_dataset) + len(test_dataset)
+    expected = 1001
+    assert abs(total - expected) < 5, f"Train+Test should be ~{expected}, got {total}"
+    print(f"✓ Train + Test = {total} (expected ~{expected})")
 
     # Check that splits are consistent
     train_dataset2 = BanknoteDataset(split='train')
@@ -219,10 +217,9 @@ def test_dataloaders():
     print("Test 7: DataLoaders")
     print("=" * 60)
 
-    train_loader, val_loader, test_loader = get_dataloaders(num_workers=0)
+    train_loader, test_loader = get_dataloaders(num_workers=0)
 
     print(f"✓ Train batches: {len(train_loader)}")
-    print(f"✓ Val batches: {len(val_loader)}")
     print(f"✓ Test batches: {len(test_loader)}")
 
     # Test loading a batch
@@ -241,7 +238,7 @@ def main():
     print("=" * 60 + "\n")
 
     tests = [
-        ("Train/Val Split", test_train_val_split),
+        ("Train/Test Split", test_train_test_split),
         ("Class Weights", test_class_weights),
         ("Augmentations", test_augmentations),
         ("Backbone Factory", test_backbone_factory),

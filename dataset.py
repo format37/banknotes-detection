@@ -71,19 +71,17 @@ class BanknoteDataset(Dataset):
         split: str = "train",
         config_path: str = "config.json",
         transform: Optional[A.Compose] = None,
-        train_ratio: float = 0.7,
-        val_ratio: float = 0.15,
+        train_ratio: float = 0.85,
         test_ratio: float = 0.15,
         random_seed: int = 42,
         merge_banknotes: bool = True
     ):
         """
         Args:
-            split: 'train', 'val', or 'test'
+            split: 'train' or 'test'
             config_path: Path to config.json
             transform: Albumentations transform pipeline
-            train_ratio: Ratio for training set (default: 0.7)
-            val_ratio: Ratio for validation set (default: 0.15)
+            train_ratio: Ratio for training set (default: 0.85)
             test_ratio: Ratio for test set (default: 0.15)
             random_seed: Random seed for reproducible splits
             merge_banknotes: If True, merge all banknote classes into one (default: True)
@@ -128,20 +126,18 @@ class BanknoteDataset(Dataset):
         full_dataset = concatenate_datasets([train_dataset, test_dataset])
         print(f"  Total images: {len(full_dataset)} (train: {len(train_dataset)}, test: {len(test_dataset)})")
 
-        # Create custom train/val/test split
-        train_idx, val_idx, test_idx = self._create_custom_split(
-            full_dataset, train_ratio, val_ratio, test_ratio, random_seed
+        # Create custom train/test split
+        train_idx, test_idx = self._create_custom_split(
+            full_dataset, train_ratio, test_ratio, random_seed
         )
 
         # Select subset based on split
         if split == 'train':
             self.dataset = full_dataset.select(train_idx)
-        elif split == 'val':
-            self.dataset = full_dataset.select(val_idx)
         elif split == 'test':
             self.dataset = full_dataset.select(test_idx)
         else:
-            raise ValueError(f"Unknown split: {split}")
+            raise ValueError(f"Unknown split: {split}. Use 'train' or 'test'.")
 
         print(f"  Split '{split}': {len(self.dataset)} images")
 
@@ -157,29 +153,27 @@ class BanknoteDataset(Dataset):
     def _create_custom_split(
         self,
         dataset,
-        train_ratio: float = 0.7,
-        val_ratio: float = 0.15,
+        train_ratio: float = 0.85,
         test_ratio: float = 0.15,
         random_seed: int = 42
     ):
         """
-        Create custom train/val/test split from complete dataset.
+        Create custom train/test split from complete dataset.
 
         Args:
             dataset: Full HuggingFace dataset
-            train_ratio: Proportion for training (default: 0.7)
-            val_ratio: Proportion for validation (default: 0.15)
+            train_ratio: Proportion for training (default: 0.85)
             test_ratio: Proportion for test (default: 0.15)
             random_seed: Random seed for reproducibility
 
         Returns:
-            train_idx, val_idx, test_idx: Lists of indices for each split
+            train_idx, test_idx: Lists of indices for each split
         """
         from sklearn.model_selection import train_test_split
 
         # Validate ratios
-        assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, \
-            f"Ratios must sum to 1.0, got {train_ratio + val_ratio + test_ratio}"
+        assert abs(train_ratio + test_ratio - 1.0) < 1e-6, \
+            f"Ratios must sum to 1.0, got {train_ratio + test_ratio}"
 
         # Get labels for stratification (use first object's category, merged if applicable)
         indices = list(range(len(dataset)))
@@ -195,81 +189,18 @@ class BanknoteDataset(Dataset):
             else:
                 labels.append(-1)
 
-        # First split: separate out test set
-        train_val_idx, test_idx = train_test_split(
+        # Split into train and test
+        train_idx, test_idx = train_test_split(
             indices,
             test_size=test_ratio,
             stratify=labels,
             random_state=random_seed
         )
 
-        # Second split: separate train and val from remaining data
-        # Adjust val_ratio to account for already removed test set
-        adjusted_val_ratio = val_ratio / (train_ratio + val_ratio)
+        print(f"  Custom split: train={len(train_idx)}, test={len(test_idx)}")
+        print(f"  Ratios: {len(train_idx)/len(indices):.1%} / {len(test_idx)/len(indices):.1%}")
 
-        train_val_labels = [labels[i] for i in train_val_idx]
-        train_idx, val_idx = train_test_split(
-            train_val_idx,
-            test_size=adjusted_val_ratio,
-            stratify=train_val_labels,
-            random_state=random_seed
-        )
-
-        print(f"  Custom split: train={len(train_idx)}, val={len(val_idx)}, test={len(test_idx)}")
-        print(f"  Ratios: {len(train_idx)/len(indices):.1%} / {len(val_idx)/len(indices):.1%} / {len(test_idx)/len(indices):.1%}")
-
-        return train_idx, val_idx, test_idx
-
-    def _create_train_val_split(self, train_dataset, val_ratio=0.2, random_seed=42):
-        """
-        Split HF train dataset into train/val using stratified sampling when possible.
-        Falls back to random split for classes with too few samples.
-
-        Args:
-            train_dataset: HuggingFace dataset to split
-            val_ratio: Ratio of data to use for validation
-            random_seed: Random seed for reproducibility
-
-        Returns:
-            train_idx, val_idx: Lists of indices for train and validation sets
-        """
-        from sklearn.model_selection import train_test_split
-        from collections import Counter
-
-        # Get all indices and their labels (use first object's category)
-        indices = list(range(len(train_dataset)))
-        labels = []
-        for item in train_dataset:
-            if len(item['objects']) > 0:
-                labels.append(item['objects'][0]['category'])
-            else:
-                labels.append(-1)  # Images with no objects
-
-        # Check class distribution
-        class_counts = Counter(labels)
-
-        # Try stratified split, but if some classes have < 2 samples, use random split
-        try:
-            # Stratified split to maintain class distribution
-            train_idx, val_idx = train_test_split(
-                indices,
-                test_size=val_ratio,
-                stratify=labels,
-                random_state=random_seed
-            )
-        except ValueError as e:
-            # Some classes have too few samples for stratification
-            # Fall back to random split
-            print(f"Warning: Cannot use stratified split (some classes have < 2 samples)")
-            print(f"  Falling back to random split")
-            train_idx, val_idx = train_test_split(
-                indices,
-                test_size=val_ratio,
-                random_state=random_seed,
-                shuffle=True
-            )
-
-        return train_idx, val_idx
+        return train_idx, test_idx
 
     def _build_class_mapping(self):
         """Build mapping from class IDs to names and indices, with optional banknote merging."""
@@ -616,18 +547,13 @@ def get_dataloaders(
     config_path: str = "config.json",
     num_workers: int = 4,
     merge_banknotes: bool = True
-) -> Tuple[DataLoader, DataLoader, DataLoader]:
-    """Create train, validation, and test dataloaders."""
+) -> Tuple[DataLoader, DataLoader]:
+    """Create train and test dataloaders."""
     with open(config_path, 'r') as f:
         config = json.load(f)
 
     train_dataset = BanknoteDataset(
         split='train',
-        config_path=config_path,
-        merge_banknotes=merge_banknotes
-    )
-    val_dataset = BanknoteDataset(
-        split='val',
         config_path=config_path,
         merge_banknotes=merge_banknotes
     )
@@ -646,15 +572,6 @@ def get_dataloaders(
         pin_memory=True
     )
 
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config['batch_size'],
-        shuffle=False,
-        num_workers=num_workers,
-        collate_fn=collate_fn,
-        pin_memory=True
-    )
-
     test_loader = DataLoader(
         test_dataset,
         batch_size=config['batch_size'],
@@ -664,7 +581,7 @@ def get_dataloaders(
         pin_memory=True
     )
 
-    return train_loader, val_loader, test_loader
+    return train_loader, test_loader
 
 
 if __name__ == "__main__":
@@ -693,9 +610,8 @@ if __name__ == "__main__":
 
     # Test dataloader
     print("\nTesting dataloader...")
-    train_loader, val_loader, test_loader = get_dataloaders()
+    train_loader, test_loader = get_dataloaders()
     print(f"Train batches: {len(train_loader)}")
-    print(f"Val batches: {len(val_loader)}")
     print(f"Test batches: {len(test_loader)}")
     images, targets = next(iter(train_loader))
     print(f"Batch images shape: {images.shape}")

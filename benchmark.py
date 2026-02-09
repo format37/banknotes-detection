@@ -90,7 +90,7 @@ def measure_inference_speed(
 @torch.no_grad()
 def evaluate_full(
     model: FCOS,
-    val_loader,
+    test_loader,
     dataset: BanknoteDataset,
     device: torch.device
 ) -> dict:
@@ -106,7 +106,7 @@ def evaluate_full(
     inference_times = []
 
     print('Running evaluation...')
-    for images, targets in tqdm(val_loader, desc='Evaluating'):
+    for images, targets in tqdm(test_loader, desc='Evaluating'):
         images = images.to(device)
 
         if device.type == 'cuda':
@@ -293,11 +293,11 @@ def main():
             config = json.load(f)
 
     # Create dataloader
-    _, val_loader = get_dataloaders(
+    _, test_loader = get_dataloaders(
         config_path=args.config,
         num_workers=args.num_workers
     )
-    dataset = val_loader.dataset
+    dataset = test_loader.dataset
 
     # Update config with actual number of classes
     config['num_classes'] = dataset.num_classes
@@ -337,7 +337,7 @@ def main():
     print('\n' + '=' * 60)
     print('ACCURACY BENCHMARK')
     print('=' * 60)
-    results = evaluate_full(model, val_loader, dataset, device)
+    results = evaluate_full(model, test_loader, dataset, device)
 
     print(f'\nmAP@0.5:      {results["mAP@0.5"]:.4f}')
     print(f'mAP@0.5:0.95: {results["mAP@0.5:0.95"]:.4f}')

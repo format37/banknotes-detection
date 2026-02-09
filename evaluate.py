@@ -31,7 +31,7 @@ def parse_args():
 @torch.no_grad()
 def evaluate(
     model: FCOS,
-    val_loader,
+    test_loader,
     dataset: BanknoteDataset,
     device: torch.device
 ) -> dict:
@@ -45,7 +45,7 @@ def evaluate(
     all_gt_labels = []
 
     print('Running inference...')
-    for images, targets in tqdm(val_loader, desc='Evaluating'):
+    for images, targets in tqdm(test_loader, desc='Evaluating'):
         images = images.to(device)
 
         results = model.inference(images)
@@ -109,11 +109,11 @@ def main():
             config = json.load(f)
 
     # Create dataloader
-    _, val_loader = get_dataloaders(
+    _, test_loader = get_dataloaders(
         config_path=args.config,
         num_workers=args.num_workers
     )
-    dataset = val_loader.dataset
+    dataset = test_loader.dataset
 
     print(f'Test samples: {len(dataset)}')
     print(f'Number of classes: {dataset.num_classes}')
@@ -132,7 +132,7 @@ def main():
     model.eval()
 
     # Evaluate
-    results = evaluate(model, val_loader, dataset, device)
+    results = evaluate(model, test_loader, dataset, device)
 
     # Print results
     print('\n' + '=' * 60)
